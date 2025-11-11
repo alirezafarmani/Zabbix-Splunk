@@ -1,0 +1,92 @@
+#!/usr/bin/env python3
+import os
+import sys
+import json
+import urllib.request
+import urllib.error
+from datetime import datetime
+
+LOG_FILE = "/tmp/zabbix_sender_debug.log"
+
+DEFAULT_SPLUNK_URL = "##########"
+DEFAULT_SPLUNK_TOKEN = "#########"
+
+class ZabbixToSplunk:
+    def _init_(self, splunk_url, splunk_token, host="zabbix-server"):
+        self.splunk_url = splunk_url
+        self.splunk_token = splunk_token
+        self.host = host
+
+    def send(self, subject, message, host, ipaddress, severity, event_id, hostgroup, event_duration):
+        headers = {
+            "Authorization": f"Splunk {self.splunk_token}",
+            "Content-Type": "application/json"
+        }
+
+        try:
+            message_obj = json.loads(message)
+        except json.JSONDecodeError:
+            message_obj = {"raw_message": message}
+
+        subj_up = (subject or "").upper()
+        status = "PROBLEM" if "PROBLEM" in subj_up else ("RESOLVED" if ("OK" in subj_up or "RESOLVED" in subj_up) else "UNKNOWN")
+
+        payload = {
+            "event": {
+                "alert_subject": subject,
+                "alert_message": {
+                    "event_id": event_id,
+                    "host_ip": ipaddress,
+                    "problem_time": datetime.now().strftime("%Y.%m.%d %H:%M:%S"),
+                    "severity": severity,
+                    "raw_message": message_obj,
+                    "host_group": hostgroup,
+                    "event_duration": event_duration
+                },
+                "os_host_name": host,
+                "host_ip": ipaddress,
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+                "status": status,
+            },
+            "sourcetype": "_json",
+            "host": self.host
+        }
+        try:
+            with open(LOG_FILE, "a") as f:
+                f.write(json.dumps(payload, indent=2, ensure_ascii=False) + "\n\n")
+        except Exception as e:
+            print(f"Failed to write debug log: {e}", file=sys.stderr)
+
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(self.splunk_url, data=data, headers=headers, method="POST")
+
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                resp_body = resp.read().decode()
+                print(f"Splunk Response: {resp.status} - {resp_body}")
+        except urllib.error.HTTPError as e:
+            body = e.read().decode() if e.fp else ""
+            print(f"HTTPError sending to Splunk: {e.code} - {body}", file=sys.stderr)
+        except urllib.error.URLError as e:
+            print(f"URLError sending to Splunk: {e.reason}", file=sys.stderr)
+        except Exception as e:
+            print(f"Unexpected error sending to Splunk: {e}", file=sys.stderr)
+
+
+if _name_ == "_main_":
+    if len(sys.argv) != 9:
+        print("Usage: sender2.py <SUBJECT> <MESSAGE> <HOST> <IPADDRESS> <SEVERITY> <EVENT_ID> <HOSTGROUP> <EVENTDURATION>")
+        sys.exit(1)
+
+    subject, message, host, ipaddress, severity, event_id, hostgroup, event_duration = sys.argv[1:9]
+
+    splunk_url = os.getenv("SPLUNK_HEC_URL", DEFAULT_SPLUNK_URL)
+    splunk_token = os.getenv("SPLUNK_HEC_TOKEN", DEFAULT_SPLUNK_TOKEN)
+
+    z2s = ZabbixToSplunk(
+        splunk_url=splunk_url,
+        splunk_token=splunk_token,
+        host="zabbix-server"
+    )
+
+    z2s.send(subject, message, host, ipaddress, severity, event_id, hostgroup, event_duration)
